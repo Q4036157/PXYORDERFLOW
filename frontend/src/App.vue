@@ -61,9 +61,10 @@ let shuttingDown = false;
 
 const activeAccount = computed(() => accounts.value.find((account) => account.id === accountId.value));
 const runtimeTradeMode = computed(() => String(health.value.tradeMode || "").toLowerCase());
-const executionMode = computed<"LIVE" | "MOCK" | "READ ONLY">(() => {
+const executionMode = computed<"LIVE" | "TESTNET" | "MOCK" | "READ ONLY">(() => {
+  if (runtimeTradeMode.value === "mock") return "MOCK";
   if (activeAccount.value?.mode === "live") return "LIVE";
-  if (activeAccount.value?.mode === "demo" || runtimeTradeMode.value === "mock") return "MOCK";
+  if (activeAccount.value?.mode === "demo" && runtimeTradeMode.value.startsWith("lh")) return "TESTNET";
   return "READ ONLY";
 });
 const writesEnabled = computed(() => health.value.tradingEnabled === true);
@@ -182,8 +183,9 @@ function makeSubmissionId(): string {
 }
 
 function setTradeArmed(next: boolean): void {
-  if (next && executionMode.value === "LIVE") {
-    const confirmed = window.confirm("Arm LIVE order entry for the platform-authorized account?");
+  if (next && ["LIVE", "TESTNET"].includes(executionMode.value)) {
+    const target = executionMode.value === "LIVE" ? "the live exchange" : "the exchange testnet";
+    const confirmed = window.confirm(`Arm ${executionMode.value} order entry? Orders will be submitted to ${target}.`);
     if (!confirmed) return;
   }
   tradeArmed.value = next;
@@ -419,7 +421,7 @@ onUnmounted(() => {
       <div class="meta">
         <span>MD {{ health.mdMode || "-" }}</span>
         <span>ROUTE {{ health.tradeMode || "-" }}</span>
-        <span class="execution-state" :class="{ live: executionMode === 'LIVE', mock: executionMode === 'MOCK', locked: !canSubmit }">{{ tradeStateText }}</span>
+        <span class="execution-state" :class="{ live: executionMode === 'LIVE', testnet: executionMode === 'TESTNET', mock: executionMode === 'MOCK', locked: !canSubmit }">{{ tradeStateText }}</span>
         <span class="session-state" :class="sessionState" :title="sessionDetail">{{ sessionStateText }}</span>
         <span class="market-state" :class="marketStateClass" :title="marketStatusError">{{ marketStatusText }}</span>
       </div>
@@ -512,6 +514,7 @@ onUnmounted(() => {
 .meta .off { color: var(--ask); }
 .execution-state, .session-state { padding: 3px 5px; border: 1px solid var(--border); font-size: 10px; }
 .execution-state.live { color: #ffab91; border-color: #8b3d35; background: #2b1618; }
+.execution-state.testnet { color: #ffd166; border-color: #7a6427; background: #28230f; }
 .execution-state.mock { color: var(--brand); border-color: #23635c; background: #102a2b; }
 .execution-state.locked { color: var(--mid); }
 .session-state.ready { color: var(--bid); }

@@ -6,7 +6,7 @@ const props = defineProps<{
   account?: Account;
   qty: number;
   postOnly: boolean;
-  executionMode: "LIVE" | "MOCK" | "READ ONLY";
+  executionMode: "LIVE" | "TESTNET" | "MOCK" | "READ ONLY";
   sessionText: string;
   sessionDetail: string;
   tradeArmed: boolean;
@@ -100,6 +100,7 @@ function setQty(value: number): void {
 .account-readout strong, .mode-readout strong { font-size: 12px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .account-readout small, .mode-readout small { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mode-readout.live strong { color: #ffab91; }
+.mode-readout.testnet strong { color: #ffd166; }
 .mode-readout.mock strong { color: var(--brand); }
 .arm-switch { min-width: 115px; display: grid; grid-template-columns: auto auto; gap: 3px 6px; align-items: center; padding-bottom: 1px; }
 .arm-switch > span { grid-column: 1 / -1; }
