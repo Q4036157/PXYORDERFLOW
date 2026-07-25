@@ -65,7 +65,10 @@ class OrderFlowRuntime:
                 bids=bids, asks=asks, ts=ts, nonce=nonce, begin_nonce=begin_nonce
             )
             if not ok:
-                logger.warning("book nonce gap — need resubscribe snapshot")
+                logger.warning("book nonce gap; requesting an authoritative snapshot")
+                await self._broadcast_market_data()
+                await self._recover_book("nonce gap")
+                return
             await self._broadcast_book(force=False)
 
         async def on_trade(symbol, price, qty, side, ts, trade_id):
@@ -156,11 +159,44 @@ class OrderFlowRuntime:
         snap = self.book.snapshot(depth=80)
         await self._broadcast({"type": "book", "data": snap.to_dict()})
 
+    def market_data_status(self) -> dict[str, Any]:
+        md_status = getattr(self._md, "book_sync_status", {}) if self._md else {}
+        return {
+            "transport": getattr(self._md, "mode", None) if self._md else None,
+            "book": self.book.sync_status(),
+            "upstreamBook": md_status,
+        }
+
+    async def _broadcast_market_data(self) -> None:
+        await self._broadcast({"type": "market_data", "data": self.market_data_status()})
+
+    async def _recover_book(self, reason: str) -> None:
+        recover = getattr(self._md, "request_book_resync", None)
+        if recover is None:
+            self.book.mark_resync_failed("market-data transport cannot request a snapshot")
+            await self._broadcast_market_data()
+            return
+        self.book.begin_resync(reason)
+        await self._broadcast_market_data()
+        try:
+            ok = await recover(reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("book recovery raised an exception: %s", exc)
+            ok = False
+        if ok:
+            await self._broadcast_book(force=True)
+        else:
+            self.book.mark_resync_failed("authoritative snapshot recovery failed")
+        await self._broadcast_market_data()
+
     async def _periodic_push(self) -> None:
         while True:
             await asyncio.sleep(1.0)
             bar = self.flow.get_bar()
             if bar:
+                chart = self.flow.chart_snapshot()
                 await self._broadcast(
                     {
                         "type": "footprint",
@@ -170,6 +206,7 @@ class OrderFlowRuntime:
                         },
                     }
                 )
+                await self._broadcast({"type": "chart", "data": chart})
             self.flow.prune()
 
     async def place_from_ladder(
@@ -239,11 +276,14 @@ class OrderFlowRuntime:
             "book": self.book.snapshot(80).to_dict(),
             "footprint": bar.to_dict() if bar else None,
             "cvd": self.flow.cumulative_delta,
+            "chart": self.flow.chart_snapshot(),
             "tape": [t.to_dict() for t in self.flow.recent_tape(30)],
             "tradingEnabled": self.risk.cfg.trading_enabled,
+            "cancelEnabled": True,
             "mdMode": self.cfg.md_mode,
-            "mdTransport": getattr(self._md, "mode", None) if self._md else None,
+            "marketData": self.market_data_status(),
             "tradeMode": self.cfg.trade_mode,
+            "tradeStatus": "public mock execution adapter",
             "tickSize": self.cfg.tick_size,
             "marketId": self.cfg.lighter_market_id,
         }

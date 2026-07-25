@@ -1,222 +1,190 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { LocateFixed, X } from "@lucide/vue";
 import type { BookLevel, OwnOrder, Side } from "../types";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   bids: BookLevel[];
   asks: BookLevel[];
   ownOrders: OwnOrder[];
   centerRows?: number;
-}>();
+  locked?: boolean;
+  cancelLocked?: boolean;
+  cancellingOrderIds?: string[];
+}>(), {
+  centerRows: 30,
+  locked: false,
+  cancelLocked: true,
+  cancellingOrderIds: () => [],
+});
 
 const emit = defineEmits<{
   clickLevel: [payload: { side: Side; price: number }];
   cancelOrder: [orderId: string];
 }>();
+const body = ref<HTMLDivElement | null>(null);
 
-const rows = computed(() => {
-  const n = props.centerRows ?? 40;
-  const asks = [...props.asks].sort((a, b) => a.price - b.price).slice(0, n).reverse();
-  const bids = [...props.bids].sort((a, b) => b.price - a.price).slice(0, n);
-  const maxQty = Math.max(
-    0.0001,
-    ...asks.map((x) => x.qty),
-    ...bids.map((x) => x.qty),
-  );
+type LadderRow = {
+  key: string;
+  price: number;
+  bidQty: number;
+  askQty: number;
+  bidPct: number;
+  askPct: number;
+  own: OwnOrder[];
+};
 
+const rows = computed<LadderRow[]>(() => {
+  const rawAsks = [...props.asks].sort((a, b) => a.price - b.price).slice(0, props.centerRows);
+  const rawBids = [...props.bids].sort((a, b) => b.price - a.price).slice(0, props.centerRows);
+  const localBestAsk = rawAsks[0]?.price ?? Number.POSITIVE_INFINITY;
+  const localBestBid = rawBids[0]?.price ?? Number.NEGATIVE_INFINITY;
+  const localMid = Number.isFinite(localBestAsk) && Number.isFinite(localBestBid)
+    ? (localBestAsk + localBestBid) / 2
+    : Number.isFinite(localBestAsk) ? localBestAsk : localBestBid;
   const ownByPrice = new Map<number, OwnOrder[]>();
-  for (const o of props.ownOrders) {
-    const key = Number(o.price);
-    const list = ownByPrice.get(key) || [];
-    list.push(o);
-    ownByPrice.set(key, list);
+  for (const order of props.ownOrders) {
+    const existing = ownByPrice.get(Number(order.price)) || [];
+    existing.push(order);
+    ownByPrice.set(Number(order.price), existing);
   }
+  const askMap = new Map(rawAsks.map((level) => [Number(level.price), level]));
+  const bidMap = new Map(rawBids.map((level) => [Number(level.price), level]));
+  for (const price of ownByPrice.keys()) {
+    const target = price >= localMid ? askMap : bidMap;
+    if (!target.has(price)) target.set(price, { price, qty: 0 });
+  }
+  const asks = [...askMap.values()].sort((a, b) => a.price - b.price).reverse();
+  const bids = [...bidMap.values()].sort((a, b) => b.price - a.price);
+  const maxQty = Math.max(0.0001, ...asks.map((row) => row.qty), ...bids.map((row) => row.qty));
 
-  type Row = {
-    key: string;
-    price: number;
-    bidQty: number;
-    askQty: number;
-    bidPct: number;
-    askPct: number;
-    own: OwnOrder[];
-  };
-
-  const out: Row[] = [];
-  for (const a of asks) {
-    out.push({
-      key: `a-${a.price}`,
-      price: a.price,
+  return [
+    ...asks.map((level) => ({
+      key: `ask-${level.price}`,
+      price: level.price,
       bidQty: 0,
-      askQty: a.qty,
+      askQty: level.qty,
       bidPct: 0,
-      askPct: (a.qty / maxQty) * 100,
-      own: ownByPrice.get(a.price) || [],
-    });
-  }
-  for (const b of bids) {
-    out.push({
-      key: `b-${b.price}`,
-      price: b.price,
-      bidQty: b.qty,
+      askPct: (level.qty / maxQty) * 100,
+      own: ownByPrice.get(Number(level.price)) || [],
+    })),
+    ...bids.map((level) => ({
+      key: `bid-${level.price}`,
+      price: level.price,
+      bidQty: level.qty,
       askQty: 0,
-      bidPct: (b.qty / maxQty) * 100,
+      bidPct: (level.qty / maxQty) * 100,
       askPct: 0,
-      own: ownByPrice.get(b.price) || [],
-    });
-  }
-  return out;
+      own: ownByPrice.get(Number(level.price)) || [],
+    })),
+  ];
 });
 
-function fmt(n: number, d = 2): string {
-  if (!Number.isFinite(n)) return "-";
-  return n.toFixed(d);
+const firstBidIndex = computed(() => rows.value.findIndex((row) => row.key.startsWith("bid-")));
+const bestBid = computed(() => Math.max(...props.bids.map((row) => row.price), Number.NEGATIVE_INFINITY));
+const bestAsk = computed(() => Math.min(...props.asks.map((row) => row.price), Number.POSITIVE_INFINITY));
+const midPrice = computed(() => {
+  if (Number.isFinite(bestBid.value) && Number.isFinite(bestAsk.value)) return (bestBid.value + bestAsk.value) / 2;
+  return Number.isFinite(bestBid.value) ? bestBid.value : bestAsk.value;
+});
+const spread = computed(() =>
+  Number.isFinite(bestBid.value) && Number.isFinite(bestAsk.value) ? bestAsk.value - bestBid.value : Number.NaN,
+);
+
+function format(value: number, digits = 2): string {
+  return Number.isFinite(value) ? value.toFixed(digits) : "-";
 }
 
-function onBuy(price: number) {
-  emit("clickLevel", { side: "buy", price });
+function recenter(): void {
+  void nextTick(() => body.value?.querySelector(".mid-row")?.scrollIntoView({ block: "center" }));
 }
-function onSell(price: number) {
-  emit("clickLevel", { side: "sell", price });
-}
+
+watch(() => `${bestBid.value}:${bestAsk.value}`, (next, previous) => {
+  if (!previous || previous === "-Infinity:Infinity") recenter();
+});
+watch(() => rows.value.length, recenter, { flush: "post" });
+onMounted(recenter);
 </script>
 
 <template>
   <div class="ladder">
+    <div class="toolbar">
+      <strong>DOM</strong>
+      <span>{{ rows.length }} LEVELS</span>
+      <button type="button" title="Recenter depth ladder" @click="recenter"><LocateFixed :size="14" /></button>
+    </div>
     <div class="head">
-      <span>买量</span>
-      <span>价格</span>
-      <span>卖量</span>
-      <span>挂单</span>
+      <span>BID</span>
+      <span>PRICE</span>
+      <span>ASK</span>
+      <span>ORD</span>
     </div>
-    <div class="body">
-      <div v-for="row in rows" :key="row.key" class="row">
-        <button class="bid-cell" type="button" @click="onBuy(row.price)">
-          <i class="bar bid" :style="{ width: row.bidPct + '%' }" />
-          <span>{{ row.bidQty ? fmt(row.bidQty, 4) : "" }}</span>
-        </button>
-        <div class="px" :class="{ mid: row.bidQty && row.askQty }">{{ fmt(row.price, 2) }}</div>
-        <button class="ask-cell" type="button" @click="onSell(row.price)">
-          <i class="bar ask" :style="{ width: row.askPct + '%' }" />
-          <span>{{ row.askQty ? fmt(row.askQty, 4) : "" }}</span>
-        </button>
-        <div class="own">
-          <button
-            v-for="o in row.own"
-            :key="o.orderId"
-            type="button"
-            class="own-chip"
-            :class="o.side"
-            :title="`${o.side} ${o.qty} @ ${o.price}`"
-            @click.stop="emit('cancelOrder', o.orderId)"
-          >
-            {{ o.side === "buy" ? "B" : "S" }}{{ o.qty }}
-          </button>
+    <div ref="body" class="body">
+      <template v-for="(row, index) in rows" :key="row.key">
+        <div v-if="index === firstBidIndex" class="mid-row">
+          <span>MID {{ format(midPrice, 2) }}</span>
+          <span>SPREAD {{ format(spread, 2) }}</span>
         </div>
-      </div>
+        <div class="row">
+          <button class="bid-cell" type="button" :disabled="locked" @click="emit('clickLevel', { side: 'buy', price: row.price })">
+            <i class="bar bid" :style="{ width: `${row.bidPct}%` }" />
+            <span :class="{ action: !row.bidQty }">{{ row.bidQty ? format(row.bidQty, 4) : "B" }}</span>
+          </button>
+          <div class="px">{{ format(row.price, 2) }}</div>
+          <button class="ask-cell" type="button" :disabled="locked" @click="emit('clickLevel', { side: 'sell', price: row.price })">
+            <i class="bar ask" :style="{ width: `${row.askPct}%` }" />
+            <span :class="{ action: !row.askQty }">{{ row.askQty ? format(row.askQty, 4) : "S" }}</span>
+          </button>
+          <div class="own">
+            <button
+              v-for="order in row.own"
+              :key="order.ofClientId || order.cancelId"
+              type="button"
+              class="own-chip"
+              :class="order.side"
+              :disabled="cancelLocked || !order.cancelId || order.cancellable === false || cancellingOrderIds.includes(order.cancelId)"
+              :title="order.cancelReason || `${order.side} ${order.qty} @ ${order.price}`"
+              @click.stop="emit('cancelOrder', order.cancelId)"
+            >
+              <span>{{ order.side === "buy" ? "B" : "S" }}{{ order.qty }}</span>
+              <X v-if="!cancellingOrderIds.includes(order.cancelId)" :size="9" />
+              <span v-else>...</span>
+            </button>
+          </div>
+        </div>
+      </template>
+      <div v-if="!rows.length" class="empty">Waiting for depth</div>
     </div>
+    <div class="ladder-footer"><span>BUY LIMIT</span><span>SELL LIMIT</span></div>
   </div>
 </template>
 
 <style scoped>
-.ladder {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.head,
-.row {
-  display: grid;
-  grid-template-columns: 1fr 88px 1fr 72px;
-  gap: 4px;
-  align-items: center;
-}
-.head {
-  padding: 8px 10px;
-  color: var(--muted);
-  font-size: 12px;
-  border-bottom: 1px solid var(--border);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.body {
-  overflow: auto;
-  flex: 1;
-  font-variant-numeric: tabular-nums;
-}
-.row {
-  padding: 1px 6px;
-  height: 22px;
-}
-.bid-cell,
-.ask-cell {
-  position: relative;
-  height: 20px;
-  border: 0;
-  background: transparent;
-  padding: 0 6px;
-  overflow: hidden;
-  border-radius: 2px;
-}
-.bid-cell {
-  text-align: right;
-  color: var(--bid);
-}
-.ask-cell {
-  text-align: left;
-  color: var(--ask);
-}
-.bid-cell:hover {
-  background: rgba(22, 199, 132, 0.12);
-}
-.ask-cell:hover {
-  background: rgba(234, 57, 67, 0.12);
-}
-.bar {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  opacity: 0.18;
-  pointer-events: none;
-}
-.bar.bid {
-  right: 0;
-  background: var(--bid);
-}
-.bar.ask {
-  left: 0;
-  background: var(--ask);
-}
-.px {
-  text-align: center;
-  font-weight: 600;
-  font-size: 12px;
-}
-.px.mid {
-  color: var(--mid);
-}
-.own {
-  display: flex;
-  gap: 2px;
-  justify-content: flex-end;
-}
-.own-chip {
-  font-size: 10px;
-  padding: 0 4px;
-  height: 18px;
-  line-height: 16px;
-}
-.own-chip.buy {
-  color: var(--bid);
-  border-color: #1f5a40;
-}
-.own-chip.sell {
-  color: var(--ask);
-  border-color: #5a1f28;
-}
+.ladder { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--panel-deep); border: 1px solid var(--border); overflow: hidden; }
+.toolbar { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 0 7px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 9px; }
+.toolbar strong { color: var(--text); font-size: 11px; }
+.toolbar button { margin-left: auto; width: 26px; height: 24px; display: grid; place-items: center; padding: 0; }
+.head, .row { display: grid; grid-template-columns: minmax(64px, 1fr) 78px minmax(64px, 1fr) 52px; gap: 3px; align-items: center; }
+.head { min-height: 31px; padding: 0 6px; color: var(--muted); font-size: 10px; border-bottom: 1px solid var(--border); letter-spacing: 0.05em; }
+.body { overflow: auto; flex: 1; font-variant-numeric: tabular-nums; }
+.row { padding: 0 4px; height: 20px; }
+.bid-cell, .ask-cell { position: relative; height: 20px; border: 0; background: transparent; padding: 0 4px; overflow: hidden; border-radius: 0; font-size: 11px; }
+.bid-cell { text-align: right; color: var(--bid); }
+.ask-cell { text-align: left; color: var(--ask); }
+.bid-cell:not(:disabled):hover { background: rgba(20, 199, 132, 0.13); }
+.ask-cell:not(:disabled):hover { background: rgba(239, 82, 93, 0.13); }
+.action { opacity: 0.58; font-size: 9px; font-weight: 700; }
+.bar { position: absolute; top: 0; bottom: 0; opacity: 0.22; pointer-events: none; }
+.bar.bid { right: 0; background: var(--bid); }
+.bar.ask { left: 0; background: var(--ask); }
+.bid-cell span, .ask-cell span { position: relative; z-index: 1; }
+.px { text-align: center; font-weight: 650; font-size: 11px; color: #dbe4ed; }
+.own { display: flex; gap: 1px; justify-content: flex-end; overflow: hidden; }
+.own-chip { max-width: 50px; overflow: hidden; text-overflow: ellipsis; font-size: 9px; padding: 0 3px; height: 17px; line-height: 15px; border-radius: 0; display: inline-flex; align-items: center; gap: 2px; }
+.own-chip.buy { color: var(--bid); border-color: #1f5a40; }
+.own-chip.sell { color: var(--ask); border-color: #5a1f28; }
+.mid-row { height: 23px; padding: 0 7px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #344556; border-bottom: 1px solid #344556; color: var(--mid); font-size: 10px; font-variant-numeric: tabular-nums; background: #161e28; }
+.empty { padding: 18px 8px; color: var(--muted); text-align: center; font-size: 11px; }
+.ladder-footer { min-height: 26px; padding: 0 7px; border-top: 1px solid var(--border); color: var(--muted); font-size: 9px; display: flex; align-items: center; justify-content: space-between; }
+button:disabled { cursor: not-allowed; opacity: 0.5; }
 </style>

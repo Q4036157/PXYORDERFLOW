@@ -16,10 +16,12 @@ market data is supported first, with adapter interfaces for additional venues.
 
 ## 已有功能
 
-- 价格梯子与实时盘口
-- Footprint、逐笔成交和累计 Delta
+- 60 档 DOM 价格梯子、盘口自动居中与一键被动限价单
+- 多 Bar Footprint、3:1 Imbalance、POC、逐笔成交与独立 CVD 面板
+- Working Orders、Positions、Fills 工作区与单笔撤单
+- 图表拖动、缩放、十字光标以及桌面/手机响应式布局
 - Lighter WebSocket 行情，异常时自动回退到 REST
-- 限价下单、撤单与全部撤单的 Mock 执行流程
+- 默认启用 Post Only 的限价下单、撤单与全部撤单 Mock 流程
 - 订单数量和名义金额风控门闩
 - FastAPI、WebSocket、Vue 3 前后端结构
 - 可扩展的 `TradeClient` 交易适配协议
@@ -91,7 +93,8 @@ scripts/   本地开发辅助脚本
 
 ## 许可与风险声明
 
-代码采用 [Apache License 2.0](LICENSE) 发布。
+代码采用 [Apache License 2.0](LICENSE) 发布，依赖归属见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 本项目用于软件开发、市场数据研究和技术演示，不承诺收益，不构成投资建议，
 也不代管用户资金。真实交易具有损失风险，请先在模拟或测试账户验证。

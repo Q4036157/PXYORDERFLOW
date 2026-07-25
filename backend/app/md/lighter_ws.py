@@ -1,6 +1,6 @@
-"""Lighter public market data with WebSocket and REST fallback.
+"""Lighter 公开行情：优先 WS order_book+trade，失败则 REST 轮询回退。
 
-The adapter is read-only and independent from execution services.
+MVP：只读直连交易所，不接触任何私有交易或跟单路径。
 
 说明：
 - 官方 SDK 在 connected 后再 subscribe
@@ -80,10 +80,51 @@ class LighterMarketData:
         self._ws = None
         self._seen_trades: set[str] = set()
         self._mode = "init"
+        self._book_sync_state = "starting"
+        self._book_sync_error = ""
+        self._book_resync_count = 0
+        self._resync_lock = asyncio.Lock()
 
     @property
     def mode(self) -> str:
         return self._mode
+
+    @property
+    def book_sync_status(self) -> dict[str, object]:
+        return {
+            "state": self._book_sync_state,
+            "error": self._book_sync_error or None,
+            "resyncCount": self._book_resync_count,
+        }
+
+    async def request_book_resync(self, reason: str = "") -> bool:
+        """Recover from a WS nonce gap with an authoritative REST snapshot.
+
+        Sending another subscribe frame alone cannot prove that the next message is
+        a full snapshot.  The REST order-book endpoint is explicitly a snapshot,
+        so it is used even while the trade stream remains on WebSocket.  Failure is
+        retained as state for the API/WS instead of silently rendering stale depth.
+        """
+        async with self._resync_lock:
+            self._book_sync_state = "resyncing"
+            self._book_sync_error = reason
+            self._book_resync_count += 1
+            try:
+                ok = await self._fetch_rest_book_snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Lighter book resync failed: %s", exc)
+                ok = False
+                self._book_sync_error = str(exc)
+            if ok:
+                self._book_sync_state = "healthy"
+                self._book_sync_error = ""
+            else:
+                self._book_sync_state = "failed"
+                if not self._book_sync_error:
+                    self._book_sync_error = "snapshot request returned no usable book"
+            return ok
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -238,6 +279,8 @@ class LighterMarketData:
                 await _maybe_await(
                     self.on_book_snapshot(self.symbol, bids, asks, ts, None)
                 )
+                self._book_sync_state = "healthy"
+                self._book_sync_error = ""
 
         if not isinstance(r_tr, Exception) and getattr(r_tr, "status_code", 0) == 200:
             try:
@@ -277,6 +320,31 @@ class LighterMarketData:
                         self.on_trade(self.symbol, price, size, side, t_ts, tid)
                     )
 
+    async def _fetch_rest_book_snapshot(self) -> bool:
+        """Fetch only the book half of the REST fallback, for targeted recovery."""
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{self.rest_base}/api/v1/orderBookOrders",
+                params={"market_id": self.market_id, "limit": self.rest_depth},
+            )
+        if response.status_code != 200:
+            self._book_sync_error = f"snapshot HTTP {response.status_code}"
+            return False
+        try:
+            body = response.json()
+        except Exception as exc:
+            self._book_sync_error = f"invalid snapshot JSON: {exc}"
+            return False
+        bids = _aggregate_orders(body.get("bids") or [])
+        asks = _aggregate_orders(body.get("asks") or [])
+        if not (bids or asks) or self.on_book_snapshot is None:
+            self._book_sync_error = "snapshot contained no levels"
+            return False
+        await _maybe_await(self.on_book_snapshot(self.symbol, bids, asks, time.time(), None))
+        return True
+
     async def _handle(self, raw) -> None:
         try:
             msg = raw if isinstance(raw, dict) else json.loads(raw)
@@ -311,6 +379,8 @@ class LighterMarketData:
                     await _maybe_await(
                         self.on_book_snapshot(self.symbol, bids, asks, ts, nonce)
                     )
+                    self._book_sync_state = "healthy"
+                    self._book_sync_error = ""
             else:
                 if self.on_book_delta:
                     await _maybe_await(
@@ -358,7 +428,7 @@ def _infer_trade_side(t: dict) -> str:
         return "buy"
     if t.get("type") in {1, "sell"}:
         return "sell"
-    return "buy"
+    return "unknown"
 
 
 async def _maybe_await(result) -> None:
@@ -383,6 +453,16 @@ class MockMarketData:
         self._task: asyncio.Task | None = None
         self._stopping = False
         self.mode = "mock"
+
+    @property
+    def book_sync_status(self) -> dict[str, object]:
+        return {"state": "healthy", "error": None, "resyncCount": 0}
+
+    async def request_book_resync(self, reason: str = "") -> bool:
+        # The generator publishes a complete snapshot on every cycle.  There is no
+        # incremental nonce stream to recover, but exposing the method keeps the
+        # runtime recovery contract uniform in tests.
+        return True
 
     async def start(self) -> None:
         self._stopping = False

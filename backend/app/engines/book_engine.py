@@ -23,6 +23,9 @@ class BookEngine:
         self.ts: float = 0.0
         self.nonce: int | None = None
         self.last_nonce: int | None = None
+        self.desynced = False
+        self.sync_state = "healthy"
+        self.sync_error = ""
 
     def apply_snapshot(
         self,
@@ -42,9 +45,14 @@ class BookEngine:
             if q > 0:
                 self._asks[_price_key(price)] = q
         self.ts = ts
-        if nonce is not None:
-            self.nonce = nonce
-            self.last_nonce = nonce
+        # A REST recovery snapshot has no stream nonce.  Clear the old WS nonce so
+        # the first subsequent delta can establish a new sequence instead of
+        # immediately being judged against the stale pre-recovery value.
+        self.nonce = nonce
+        self.last_nonce = nonce
+        self.desynced = False
+        self.sync_state = "healthy"
+        self.sync_error = ""
 
     def apply_delta(
         self,
@@ -59,11 +67,18 @@ class BookEngine:
         应用单档增量。
         若提供 begin_nonce 且与 last_nonce 不连续，返回 False（调用方应重订阅快照）。
         """
+        if self.desynced:
+            return False
         if (
             begin_nonce is not None
             and self.last_nonce is not None
             and begin_nonce != self.last_nonce
         ):
+            self.desynced = True
+            self.sync_state = "desynced"
+            self.sync_error = (
+                f"nonce gap: expected begin_nonce={self.last_nonce}, got {begin_nonce}"
+            )
             return False
 
         key = _price_key(price)
@@ -88,11 +103,18 @@ class BookEngine:
         nonce: int | None = None,
         begin_nonce: int | None = None,
     ) -> bool:
+        if self.desynced:
+            return False
         if (
             begin_nonce is not None
             and self.last_nonce is not None
             and begin_nonce != self.last_nonce
         ):
+            self.desynced = True
+            self.sync_state = "desynced"
+            self.sync_error = (
+                f"nonce gap: expected begin_nonce={self.last_nonce}, got {begin_nonce}"
+            )
             return False
         for row in bids or []:
             self.apply_delta("bid", row["price"], row.get("size", row.get("qty", 0)), ts)
@@ -103,6 +125,23 @@ class BookEngine:
             self.last_nonce = nonce
         self.ts = ts
         return True
+
+    def begin_resync(self, reason: str) -> None:
+        self.desynced = True
+        self.sync_state = "resyncing"
+        self.sync_error = reason
+
+    def mark_resync_failed(self, reason: str) -> None:
+        self.desynced = True
+        self.sync_state = "failed"
+        self.sync_error = reason
+
+    def sync_status(self) -> dict[str, object]:
+        return {
+            "state": self.sync_state,
+            "lastNonce": self.last_nonce,
+            "error": self.sync_error or None,
+        }
 
     def snapshot(self, depth: int = 50) -> BookSnapshot:
         bids = self._sorted(self._bids, reverse=True)[:depth]

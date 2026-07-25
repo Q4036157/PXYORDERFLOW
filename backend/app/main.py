@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -83,12 +83,19 @@ async def health() -> dict[str, Any]:
         "mdMode": settings.md_mode,
         "tradeMode": settings.trade_mode,
         "tradingEnabled": settings.trading_enabled,
+        "cancelEnabled": True,
+        "tradeStatus": "public mock execution adapter",
     }
 
 
 @app.get("/api/state")
 async def get_state() -> dict[str, Any]:
     return runtime.state_snapshot()
+
+
+@app.get("/api/chart")
+async def get_chart(limit: int = Query(default=120, ge=1, le=120)) -> dict[str, Any]:
+    return runtime.flow.chart_snapshot(limit)
 
 
 @app.get("/api/accounts")
@@ -101,6 +108,12 @@ async def list_accounts() -> dict[str, Any]:
 async def open_orders(accountId: str, symbol: str | None = None) -> dict[str, Any]:
     rows = await runtime.list_open_orders(accountId, symbol)
     return {"orders": rows}
+
+
+@app.get("/api/portfolio")
+async def portfolio(accountId: str, symbol: str | None = None) -> dict[str, Any]:  # noqa: ARG001
+    # The public adapter is intentionally in-memory and does not simulate fills.
+    return {"positions": [], "fills": []}
 
 
 @app.post("/api/orders/place")

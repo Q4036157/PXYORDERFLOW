@@ -37,6 +37,11 @@ class TestBookEngine(unittest.TestCase):
         eng.apply_snapshot(bids=[(1, 1)], asks=[(2, 1)], ts=1, nonce=5)
         ok = eng.apply_delta("bid", 1, 2, ts=2, nonce=9, begin_nonce=7)
         self.assertFalse(ok)
+        self.assertEqual(eng.sync_status()["state"], "desynced")
+        self.assertFalse(eng.apply_delta("bid", 1, 3, ts=3, nonce=10, begin_nonce=9))
+        eng.apply_snapshot(bids=[(1, 4)], asks=[(2, 1)], ts=4, nonce=None)
+        self.assertEqual(eng.sync_status()["state"], "healthy")
+        self.assertIsNone(eng.sync_status()["lastNonce"])
 
 
 class TestFlowEngine(unittest.TestCase):
@@ -49,6 +54,25 @@ class TestFlowEngine(unittest.TestCase):
         assert bar is not None
         self.assertAlmostEqual(bar.total_delta, 0.5)
         self.assertTrue(any(b.trade_count >= 1 for b in bar.bins))
+
+    def test_chart_exposes_ohlcv_footprint_and_cvd_history(self):
+        flow = FlowEngine("BTC", interval_ms=60_000, tick_size=0.1)
+        flow.on_trade(Trade("BTC", 100.0, 2.0, "buy", ts=60.1))
+        flow.on_trade(Trade("BTC", 101.0, 1.0, "sell", ts=60.2))
+        flow.on_trade(Trade("BTC", 99.0, 3.0, "sell", ts=120.1))
+
+        snapshot = flow.chart_snapshot()
+        self.assertEqual(snapshot["intervalMs"], 60_000)
+        self.assertEqual(len(snapshot["bars"]), 2)
+        first, second = snapshot["bars"]
+        self.assertEqual(
+            (first["open"], first["high"], first["low"], first["close"]),
+            (100.0, 101.0, 100.0, 101.0),
+        )
+        self.assertEqual(first["volume"], 3.0)
+        self.assertEqual(first["delta"], 1.0)
+        self.assertEqual(first["cvd"], 1.0)
+        self.assertEqual(second["cvd"], -2.0)
 
 
 class TestOrderMapAndRisk(unittest.TestCase):

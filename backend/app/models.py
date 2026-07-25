@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from decimal import Decimal
 from typing import Any, Literal
 
 Side = Literal["buy", "sell"]
+TradeSide = Literal["buy", "sell", "unknown"]
 AccountMode = Literal["live", "demo"]
 
 OF_CLIENT_PREFIX = "OF-"
 SOURCE_ORDERFLOW = "orderflow"
+CLIENT_ORDER_INDEX_CANCEL_PREFIX = "client-index:"
 
 
 @dataclass
@@ -17,6 +20,19 @@ class Account:
     name: str
     mode: AccountMode
     can_trade: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AccountRiskSnapshot:
+    """A bounded-time account view required before any order is accepted."""
+
+    account_id: str
+    available_quote: float
+    position_notional: float
+    observed_at: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -67,7 +83,7 @@ class Trade:
     symbol: str
     price: float
     qty: float
-    side: Side
+    side: TradeSide
     ts: float
     trade_id: str = ""
 
@@ -80,6 +96,7 @@ class FootprintBin:
     price: float
     buy_vol: float = 0.0
     sell_vol: float = 0.0
+    unknown_vol: float = 0.0
     trade_count: int = 0
 
     @property
@@ -91,6 +108,7 @@ class FootprintBin:
             "price": self.price,
             "buyVol": self.buy_vol,
             "sellVol": self.sell_vol,
+            "unknownVol": self.unknown_vol,
             "tradeCount": self.trade_count,
             "delta": self.delta,
         }
@@ -122,10 +140,11 @@ class PlaceLimitRequest:
     account_id: str
     symbol: str
     side: Side
-    price: float
-    qty: float
+    price: Decimal
+    qty: Decimal
     of_client_id: str
     post_only: bool = False
+    idempotency_key: str = ""
 
 
 @dataclass
