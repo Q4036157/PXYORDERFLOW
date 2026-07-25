@@ -66,12 +66,12 @@ function setQty(value: number): void {
 
     <label class="qty-field">
       QTY
-      <input type="number" min="0" step="0.001" :value="qty" :disabled="!tradeArmed" @input="onQty" />
+      <input type="number" min="0" step="0.0001" :value="qty" :disabled="!tradeArmed" @input="onQty" />
     </label>
     <div class="qty-presets" aria-label="Quantity presets">
-      <button type="button" :disabled="!tradeArmed" @click="setQty(0.01)">.01</button>
-      <button type="button" :disabled="!tradeArmed" @click="setQty(0.05)">.05</button>
-      <button type="button" :disabled="!tradeArmed" @click="setQty(0.1)">.10</button>
+      <button type="button" :disabled="!tradeArmed" @click="setQty(0.0002)">.0002</button>
+      <button type="button" :disabled="!tradeArmed" @click="setQty(0.0005)">.0005</button>
+      <button type="button" :disabled="!tradeArmed" @click="setQty(0.001)">.001</button>
     </div>
     <label class="check">
       <input

@@ -32,7 +32,7 @@ import type {
 
 const accounts = ref<Account[]>([]);
 const accountId = ref("");
-const qty = ref(0.01);
+const qty = ref(0.001);
 const postOnly = ref(true);
 const bids = ref<BookLevel[]>([]);
 const asks = ref<BookLevel[]>([]);
