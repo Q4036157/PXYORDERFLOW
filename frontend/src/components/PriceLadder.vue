@@ -9,11 +9,15 @@ const props = withDefaults(defineProps<{
   ownOrders: OwnOrder[];
   centerRows?: number;
   locked?: boolean;
+  interactionMode?: "armed" | "cancel-only" | "locked";
+  lockReason?: string;
   cancelLocked?: boolean;
   cancellingOrderIds?: string[];
 }>(), {
   centerRows: 30,
   locked: false,
+  interactionMode: "locked",
+  lockReason: "Order entry is locked.",
   cancelLocked: true,
   cancellingOrderIds: () => [],
 });
@@ -90,6 +94,11 @@ const midPrice = computed(() => {
 const spread = computed(() =>
   Number.isFinite(bestBid.value) && Number.isFinite(bestAsk.value) ? bestAsk.value - bestBid.value : Number.NaN,
 );
+const interactionLabel = computed(() => {
+  if (props.interactionMode === "armed") return "ARMED";
+  if (props.interactionMode === "cancel-only") return "CANCEL ONLY";
+  return "LOCKED";
+});
 
 function format(value: number, digits = 2): string {
   return Number.isFinite(value) ? value.toFixed(digits) : "-";
@@ -107,16 +116,17 @@ onMounted(recenter);
 </script>
 
 <template>
-  <div class="ladder">
+  <div class="ladder" :class="interactionMode" :title="locked ? lockReason : 'Click the buy or sell column to place a limit order.'">
     <div class="toolbar">
       <strong>DOM</strong>
       <span>{{ rows.length }} LEVELS</span>
+      <span class="interaction" :class="interactionMode">{{ interactionLabel }}</span>
       <button type="button" title="Recenter depth ladder" @click="recenter"><LocateFixed :size="14" /></button>
     </div>
     <div class="head">
-      <span>BID</span>
+      <span>BUY</span>
       <span>PRICE</span>
-      <span>ASK</span>
+      <span>SELL</span>
       <span>ORD</span>
     </div>
     <div ref="body" class="body">
@@ -125,13 +135,13 @@ onMounted(recenter);
           <span>MID {{ format(midPrice, 2) }}</span>
           <span>SPREAD {{ format(spread, 2) }}</span>
         </div>
-        <div class="row">
-          <button class="bid-cell" type="button" :disabled="locked" @click="emit('clickLevel', { side: 'buy', price: row.price })">
+        <div class="row" :class="{ own: row.own.length }">
+          <button class="bid-cell" type="button" :disabled="locked" :aria-label="`Buy at ${row.price}`" :title="locked ? lockReason : `Buy at ${row.price}`" @click="emit('clickLevel', { side: 'buy', price: row.price })">
             <i class="bar bid" :style="{ width: `${row.bidPct}%` }" />
             <span :class="{ action: !row.bidQty }">{{ row.bidQty ? format(row.bidQty, 4) : "B" }}</span>
           </button>
           <div class="px">{{ format(row.price, 2) }}</div>
-          <button class="ask-cell" type="button" :disabled="locked" @click="emit('clickLevel', { side: 'sell', price: row.price })">
+          <button class="ask-cell" type="button" :disabled="locked" :aria-label="`Sell at ${row.price}`" :title="locked ? lockReason : `Sell at ${row.price}`" @click="emit('clickLevel', { side: 'sell', price: row.price })">
             <i class="bar ask" :style="{ width: `${row.askPct}%` }" />
             <span :class="{ action: !row.askQty }">{{ row.askQty ? format(row.askQty, 4) : "S" }}</span>
           </button>
@@ -155,7 +165,7 @@ onMounted(recenter);
       </template>
       <div v-if="!rows.length" class="empty">Waiting for depth</div>
     </div>
-    <div class="ladder-footer"><span>BUY LIMIT</span><span>SELL LIMIT</span></div>
+    <div class="ladder-footer"><span>CLICK BUY TO BID</span><span>CLICK SELL TO OFFER</span></div>
   </div>
 </template>
 
@@ -163,7 +173,11 @@ onMounted(recenter);
 .ladder { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--panel-deep); border: 1px solid var(--border); overflow: hidden; }
 .toolbar { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 0 7px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 9px; }
 .toolbar strong { color: var(--text); font-size: 11px; }
-.toolbar button { margin-left: auto; width: 26px; height: 24px; display: grid; place-items: center; padding: 0; }
+.toolbar button { width: 26px; height: 24px; display: grid; place-items: center; padding: 0; }
+.interaction { margin-left: auto; padding: 2px 4px; border: 1px solid var(--border); color: var(--mid); font-size: 9px; font-weight: 700; }
+.interaction.armed { color: var(--bid); border-color: #216e4e; background: #11291f; }
+.interaction.cancel-only { color: var(--mid); border-color: #67501f; background: #27200f; }
+.interaction.locked { color: var(--muted); }
 .head, .row { display: grid; grid-template-columns: minmax(64px, 1fr) 78px minmax(64px, 1fr) 52px; gap: 3px; align-items: center; }
 .head { min-height: 31px; padding: 0 6px; color: var(--muted); font-size: 10px; border-bottom: 1px solid var(--border); letter-spacing: 0.05em; }
 .body { overflow: auto; flex: 1; font-variant-numeric: tabular-nums; }
@@ -171,8 +185,9 @@ onMounted(recenter);
 .bid-cell, .ask-cell { position: relative; height: 20px; border: 0; background: transparent; padding: 0 4px; overflow: hidden; border-radius: 0; font-size: 11px; }
 .bid-cell { text-align: right; color: var(--bid); }
 .ask-cell { text-align: left; color: var(--ask); }
-.bid-cell:not(:disabled):hover { background: rgba(20, 199, 132, 0.13); }
-.ask-cell:not(:disabled):hover { background: rgba(239, 82, 93, 0.13); }
+.ladder.armed .bid-cell:not(:disabled):hover { background: rgba(20, 199, 132, 0.18); box-shadow: inset 2px 0 var(--bid); }
+.ladder.armed .ask-cell:not(:disabled):hover { background: rgba(239, 82, 93, 0.18); box-shadow: inset -2px 0 var(--ask); }
+.bid-cell:not(:disabled):active, .ask-cell:not(:disabled):active { transform: translateY(1px); filter: brightness(1.2); }
 .action { opacity: 0.58; font-size: 9px; font-weight: 700; }
 .bar { position: absolute; top: 0; bottom: 0; opacity: 0.22; pointer-events: none; }
 .bar.bid { right: 0; background: var(--bid); }
@@ -186,5 +201,6 @@ onMounted(recenter);
 .mid-row { height: 23px; padding: 0 7px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #344556; border-bottom: 1px solid #344556; color: var(--mid); font-size: 10px; font-variant-numeric: tabular-nums; background: #161e28; }
 .empty { padding: 18px 8px; color: var(--muted); text-align: center; font-size: 11px; }
 .ladder-footer { min-height: 26px; padding: 0 7px; border-top: 1px solid var(--border); color: var(--muted); font-size: 9px; display: flex; align-items: center; justify-content: space-between; }
+.ladder.cancel-only .ladder-footer { color: var(--mid); }
 button:disabled { cursor: not-allowed; opacity: 0.5; }
 </style>

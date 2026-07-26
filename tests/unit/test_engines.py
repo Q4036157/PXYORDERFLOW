@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
 
 from app.engines.book_engine import BookEngine
 from app.engines.flow_engine import FlowEngine
+from app.config import Settings
+from app import main as main_module
 from app.models import PlaceLimitRequest, Trade
+from app.md.lighter_ws import LighterMarketData
 from app.risk.risk_of import RiskOf
 from app.trade.order_map import OrderIdMapper
 
@@ -116,6 +121,75 @@ class TestMockTradeOpenOrders(unittest.IsolatedAsyncioTestCase):
         all_res = await client.cancel_all("demo-1", "BTC", confirmed=True)
         self.assertTrue(all_res.success)
         self.assertEqual(await client.list_open_orders("demo-1"), [])
+
+
+class TestLighterSnapshotSafety(unittest.IsolatedAsyncioTestCase):
+    async def test_rest_snapshot_requires_both_sides(self):
+        snapshots: list[tuple[list, list]] = []
+
+        async def on_snapshot(_symbol, bids, asks, _ts, _nonce):
+            snapshots.append((bids, asks))
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, body):
+                self.body = body
+
+            def json(self):
+                return self.body
+
+        class Client:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, *_args, **_kwargs):
+                return self.response
+
+        md = LighterMarketData(
+            market_id=1,
+            symbol="BTC",
+            on_book_snapshot=on_snapshot,
+        )
+        one_sided = Response(
+            {"bids": [{"price": "100", "remaining_base_amount": "1"}], "asks": []}
+        )
+        with patch("httpx.AsyncClient", return_value=Client(one_sided)):
+            self.assertFalse(await md._fetch_rest_book_snapshot())
+        self.assertEqual(snapshots, [])
+
+        two_sided = Response(
+            {
+                "bids": [{"price": "100", "remaining_base_amount": "1"}],
+                "asks": [{"price": "101", "remaining_base_amount": "1"}],
+            }
+        )
+        with patch("httpx.AsyncClient", return_value=Client(two_sided)):
+            self.assertTrue(await md._fetch_rest_book_snapshot())
+        self.assertEqual(len(snapshots), 1)
+
+
+class TestPublicDefaults(unittest.TestCase):
+    def test_trading_is_disabled_by_default(self):
+        self.assertFalse(Settings().trading_enabled)
+
+
+class TestStaticFrontendRoutes(unittest.IsolatedAsyncioTestCase):
+    async def test_favicon_is_served_as_svg_instead_of_spa_html(self):
+        with tempfile.TemporaryDirectory() as directory:
+            icon = Path(directory) / "favicon.svg"
+            icon.write_text("<svg />", encoding="utf-8")
+            with patch.object(main_module, "_STATIC_DIR", Path(directory)):
+                response = await main_module.favicon()
+
+        self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertEqual(Path(response.path).name, "favicon.svg")
 
 
 if __name__ == "__main__":

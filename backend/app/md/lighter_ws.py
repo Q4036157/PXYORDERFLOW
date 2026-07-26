@@ -254,6 +254,9 @@ class LighterMarketData:
             return False
         finally:
             self._ws = None
+            if not self._stopping:
+                self._book_sync_state = "disconnected"
+                self._book_sync_error = "Lighter WebSocket disconnected; awaiting a fresh snapshot"
 
     async def _poll_rest_once(self) -> None:
         import httpx
@@ -275,7 +278,7 @@ class LighterMarketData:
                 body = {}
             bids = _aggregate_orders(body.get("bids") or [])
             asks = _aggregate_orders(body.get("asks") or [])
-            if self.on_book_snapshot and (bids or asks):
+            if self.on_book_snapshot and bids and asks:
                 await _maybe_await(
                     self.on_book_snapshot(self.symbol, bids, asks, ts, None)
                 )
@@ -339,8 +342,8 @@ class LighterMarketData:
             return False
         bids = _aggregate_orders(body.get("bids") or [])
         asks = _aggregate_orders(body.get("asks") or [])
-        if not (bids or asks) or self.on_book_snapshot is None:
-            self._book_sync_error = "snapshot contained no levels"
+        if not bids or not asks or self.on_book_snapshot is None:
+            self._book_sync_error = "snapshot must contain both bid and ask levels"
             return False
         await _maybe_await(self.on_book_snapshot(self.symbol, bids, asks, time.time(), None))
         return True

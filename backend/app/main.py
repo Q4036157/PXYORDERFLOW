@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -158,6 +158,19 @@ async def ws_endpoint(ws: WebSocket) -> None:
         logger.warning("ws error: %s", exc)
     finally:
         runtime.unsubscribe(q)
+
+
+# Serve the icon explicitly so the SPA fallback can never return HTML for it.
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon():
+    icon = _STATIC_DIR / "favicon.svg"
+    if icon.is_file():
+        return FileResponse(
+            icon,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
 
 # 静态前端（生产）：/assets + SPA fallback；API/WS 路由优先注册，不冲突

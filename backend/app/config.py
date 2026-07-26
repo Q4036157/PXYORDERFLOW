@@ -16,7 +16,7 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     bind_host: str = "127.0.0.1"
     http_port: int = 3811
-    trading_enabled: bool = True
+    trading_enabled: bool = False
     md_mode: str = "mock"  # mock | lighter
     trade_mode: str = "mock"
     lighter_host: str = "mainnet.zklighter.elliot.ai"
@@ -40,7 +40,7 @@ class Settings:
         return cls(
             bind_host=os.getenv("OF_BIND_HOST", "127.0.0.1"),
             http_port=int(os.getenv("OF_HTTP_PORT", "3811")),
-            trading_enabled=_env_bool("OF_TRADING", True),
+            trading_enabled=_env_bool("OF_TRADING", False),
             md_mode=os.getenv("OF_MD_MODE", "mock").lower(),
             trade_mode=os.getenv("OF_TRADE_MODE", "mock").lower(),
             lighter_host=os.getenv("OF_LIGHTER_HOST", "mainnet.zklighter.elliot.ai"),

@@ -4,6 +4,7 @@ import PriceLadder from "./components/PriceLadder.vue";
 import OrderTicket from "./components/OrderTicket.vue";
 import OrdersPanel from "./components/OrdersPanel.vue";
 import FlowCanvas from "./components/FlowCanvas.vue";
+import { useTradingSounds } from "./composables/useTradingSounds";
 import {
   ApiError,
   cancelAll,
@@ -54,10 +55,14 @@ const sessionDetail = ref("Checking platform session...");
 const submissionId = ref("");
 const wsState = ref<"connecting" | "open" | "closed">("closed");
 const mobileTab = ref<"chart" | "dom" | "tape" | "orders">("chart");
+const { enabled: soundEnabled, volume: soundVolume, unlocked: soundReady, unlock: unlockSounds, play: playSound } = useTradingSounds();
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let recordsTimer: number | null = null;
 let shuttingDown = false;
+let lastOfflineSoundAt = 0;
+const announcedOrderIds = new Set<string>();
+const announcedCancelIds = new Set<string>();
 
 const activeAccount = computed(() => accounts.value.find((account) => account.id === accountId.value));
 const runtimeTradeMode = computed(() => String(health.value.tradeMode || "").toLowerCase());
@@ -89,6 +94,11 @@ const cancelLockReason = computed(() => {
   return "";
 });
 const canCancel = computed(() => !cancelLockReason.value);
+const ladderMode = computed<"armed" | "cancel-only" | "locked">(() => {
+  if (canSubmit.value) return "armed";
+  if (canCancel.value) return "cancel-only";
+  return "locked";
+});
 const tradeStateText = computed(() => canSubmit.value ? `${executionMode.value} ARMED` : `${executionMode.value} LOCKED`);
 const sessionStateText = computed(() => {
   if (sessionState.value === "ready") return "SESSION VERIFIED";
@@ -194,6 +204,27 @@ function setTradeArmed(next: boolean): void {
     : "Trading locked locally. No new orders can be sent.";
 }
 
+async function setSoundEnabled(next: boolean): Promise<void> {
+  if (next) await unlockSounds();
+  soundEnabled.value = next;
+}
+
+function announceOnce(ids: Set<string>, id: string | undefined, sound: "accepted" | "cancelled"): void {
+  if (id && ids.has(id)) return;
+  if (id) {
+    ids.add(id);
+    if (ids.size > 250) ids.clear();
+  }
+  playSound(sound);
+}
+
+function playOfflineOnce(): void {
+  const now = Date.now();
+  if (now - lastOfflineSoundAt < 8_000) return;
+  lastOfflineSoundAt = now;
+  playSound("offline");
+}
+
 function onWs(msg: any): void {
   if (msg.type === "hello" || msg.type === "book") {
     applyBook(msg.data?.book || msg.data);
@@ -227,6 +258,7 @@ function onWs(msg: any): void {
       ? `Order confirmed: ${order.side} ${order.qty} @ ${order.price} (${order.ofClientId || order.orderId || submissionId.value})`
       : `Order rejected: ${order.message || "unknown"}`;
     if (order.success && order.orderId) {
+      announceOnce(announcedOrderIds, order.ofClientId || order.orderId, "accepted");
       ownOrders.value = [
         {
           orderId: order.orderId,
@@ -239,10 +271,27 @@ function onWs(msg: any): void {
         },
         ...ownOrders.value.filter((item) => item.orderId !== order.orderId),
       ];
+    } else {
+      playSound("rejected");
     }
+  } else if (msg.type === "order_cancelled") {
+    const orderId = String(msg.data?.orderId || "");
+    ownOrders.value = ownOrders.value.filter((order) => order.cancelId !== orderId);
+    lastMsg.value = msg.data?.message || `Cancelled ${orderId}`;
+    announceOnce(announcedCancelIds, orderId, "cancelled");
+  } else if (msg.type === "order_terminal") {
+    const terminalStatus = String(msg.data?.terminalStatus || "").toLowerCase();
+    const orderId = String(msg.data?.orderId || "");
+    ownOrders.value = ownOrders.value.filter((order) => order.cancelId !== orderId);
+    lastMsg.value = msg.data?.message || `Order ${terminalStatus || "updated"}: ${orderId}`;
+    if (terminalStatus === "filled") playSound("filled");
+    else if (terminalStatus === "cancelled") announceOnce(announcedCancelIds, orderId, "cancelled");
+    else playSound("rejected");
+    void refreshOrderSafetyState();
   } else if (msg.type === "orders_cleared") {
     ownOrders.value = [];
     lastMsg.value = msg.data?.message || "All orders cancelled.";
+    playSound("cancelled");
   }
 }
 
@@ -254,25 +303,31 @@ function connectMarketStream(): void {
   ws.addEventListener("error", () => {
     wsState.value = "closed";
     tradeArmed.value = false;
+    playOfflineOnce();
   });
   ws.addEventListener("close", () => {
     wsState.value = "closed";
     tradeArmed.value = false;
+    playOfflineOnce();
     if (!shuttingDown) reconnectTimer = window.setTimeout(connectMarketStream, 1500);
   });
 }
 
 async function onClickLevel(payload: { side: Side; price: number }): Promise<void> {
   if (submitting.value) return;
+  await unlockSounds();
   if (!canSubmit.value) {
     lastMsg.value = tradeLockReason.value;
+    playSound("rejected");
     return;
   }
   if (qty.value <= 0) {
     lastMsg.value = "Quantity must be greater than zero.";
+    playSound("rejected");
     return;
   }
 
+  playSound("click");
   submissionId.value = makeSubmissionId();
   submitting.value = true;
   lastMsg.value = `Submitting ${payload.side} ${qty.value} @ ${payload.price} (${submissionId.value})...`;
@@ -287,12 +342,15 @@ async function onClickLevel(payload: { side: Side; price: number }): Promise<voi
     });
     if (response.success) {
       lastMsg.value = `Accepted ${response.ofClientId || response.orderId || submissionId.value}. Awaiting order stream confirmation.`;
+      announceOnce(announcedOrderIds, response.ofClientId || response.orderId, "accepted");
     } else {
       lastMsg.value = `Order rejected: ${response.message || "unknown"}`;
+      playSound("rejected");
     }
   } catch (error) {
     tradeArmed.value = false;
     lastMsg.value = `Submit outcome unknown (${submissionId.value}): ${describeError(error)}. Trading relocked.`;
+    playSound(error instanceof ApiError && error.status >= 500 ? "offline" : "rejected");
     await refreshOrderSafetyState();
   } finally {
     submitting.value = false;
@@ -301,8 +359,10 @@ async function onClickLevel(payload: { side: Side; price: number }): Promise<voi
 
 async function onCancelOrder(cancelId: string): Promise<void> {
   if (!accountId.value || cancellingOrderIds.value.includes(cancelId)) return;
+  await unlockSounds();
   if (!canCancel.value) {
     lastMsg.value = cancelLockReason.value;
+    playSound("rejected");
     return;
   }
   cancellingOrderIds.value = [...cancellingOrderIds.value, cancelId];
@@ -311,11 +371,14 @@ async function onCancelOrder(cancelId: string): Promise<void> {
     if (response.success) {
       ownOrders.value = ownOrders.value.filter((order) => order.cancelId !== cancelId);
       lastMsg.value = `Cancelled ${cancelId}`;
+      announceOnce(announcedCancelIds, cancelId, "cancelled");
     } else {
       lastMsg.value = `Cancel rejected: ${response.message || "unknown"}`;
+      playSound("rejected");
     }
   } catch (error) {
     lastMsg.value = `Cancel request failed: ${describeError(error)}`;
+    playSound(error instanceof ApiError && error.status >= 500 ? "offline" : "rejected");
   } finally {
     cancellingOrderIds.value = cancellingOrderIds.value.filter((id) => id !== cancelId);
   }
@@ -323,8 +386,10 @@ async function onCancelOrder(cancelId: string): Promise<void> {
 
 async function onCancelAll(): Promise<void> {
   if (!accountId.value || cancelAllPending.value) return;
+  await unlockSounds();
   if (!canCancel.value) {
     lastMsg.value = cancelLockReason.value;
+    playSound("rejected");
     return;
   }
   if (!window.confirm("Cancel all orders for the selected order-flow account?")) return;
@@ -335,11 +400,14 @@ async function onCancelAll(): Promise<void> {
     if (response.success) {
       ownOrders.value = [];
       lastMsg.value = response.message || "All orders cancelled.";
+      playSound("cancelled");
     } else {
       lastMsg.value = `Cancel all rejected: ${response.message || "unknown"}`;
+      playSound("rejected");
     }
   } catch (error) {
     lastMsg.value = `Cancel all request failed: ${describeError(error)}`;
+    playSound(error instanceof ApiError && error.status >= 500 ? "offline" : "rejected");
   } finally {
     cancelAllPending.value = false;
   }
@@ -444,6 +512,8 @@ onUnmounted(() => {
           :asks="asks"
           :own-orders="ownOrders"
           :locked="!canSubmit"
+          :interaction-mode="ladderMode"
+          :lock-reason="tradeLockReason"
           :cancel-locked="!canCancel"
           :cancelling-order-ids="cancellingOrderIds"
           @click-level="onClickLevel"
@@ -497,7 +567,12 @@ onUnmounted(() => {
       :cancel-all-pending="cancelAllPending"
       :cancel-enabled="canCancel"
       :cancel-lock-reason="cancelLockReason"
+      :sound-enabled="soundEnabled"
+      :sound-volume="soundVolume"
+      :sound-ready="soundReady"
       @update:trade-armed="setTradeArmed"
+      @update:sound-enabled="setSoundEnabled"
+      @update:sound-volume="soundVolume = $event"
       @cancel-all="onCancelAll"
     />
   </div>

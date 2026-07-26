@@ -3,8 +3,9 @@ setlocal
 REM Install OF backend + frontend deps only. No service start.
 
 cd /d "%~dp0..\backend"
-if exist "C:\Python312\python.exe" (
-  "C:\Python312\python.exe" -m pip install -r requirements.txt
+where py >nul 2>&1
+if not errorlevel 1 (
+  py -3 -m pip install -r requirements.txt
 ) else (
   python -m pip install -r requirements.txt
 )

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Volume2, VolumeX } from "@lucide/vue";
 import type { Account } from "../types";
 
 const props = defineProps<{
@@ -18,6 +19,9 @@ const props = defineProps<{
   cancelAllPending: boolean;
   cancelEnabled: boolean;
   cancelLockReason: string;
+  soundEnabled: boolean;
+  soundVolume: number;
+  soundReady: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -25,6 +29,8 @@ const emit = defineEmits<{
   "update:qty": [value: number];
   "update:postOnly": [value: boolean];
   "update:tradeArmed": [value: boolean];
+  "update:soundEnabled": [value: boolean];
+  "update:soundVolume": [value: number];
   cancelAll: [];
 }>();
 
@@ -35,6 +41,11 @@ function onQty(event: Event): void {
 
 function setQty(value: number): void {
   emit("update:qty", value);
+}
+
+function onSoundVolume(event: Event): void {
+  const value = Number((event.target as HTMLInputElement).value);
+  emit("update:soundVolume", Number.isFinite(value) ? value : 0);
 }
 </script>
 
@@ -82,6 +93,28 @@ function setQty(value: number): void {
       />
       POST ONLY
     </label>
+    <div class="sound-control" :class="{ muted: !soundEnabled }">
+      <span>SOUND</span>
+      <button
+        type="button"
+        class="sound-toggle"
+        :title="soundEnabled ? 'Mute order-flow sounds' : 'Enable order-flow sounds (requires this click to unlock audio)'"
+        :aria-label="soundEnabled ? 'Mute order-flow sounds' : 'Enable order-flow sounds'"
+        @click="emit('update:soundEnabled', !soundEnabled)"
+      ><Volume2 v-if="soundEnabled" :size="14" /><VolumeX v-else :size="14" /></button>
+      <input
+        type="range"
+        min="0"
+        max="1"
+        step="0.05"
+        :value="soundVolume"
+        :disabled="!soundEnabled"
+        title="Order-flow sound volume"
+        aria-label="Order-flow sound volume"
+        @input="onSoundVolume"
+      />
+      <small>{{ soundEnabled ? (soundReady ? 'ON' : 'TAP') : 'MUTED' }}</small>
+    </div>
     <button class="danger" type="button" :title="cancelLockReason" :disabled="!cancelEnabled || cancelAllPending" @click="emit('cancelAll')">
       {{ cancelAllPending ? "CANCELLING" : "CANCEL ALL" }}
     </button>
@@ -113,6 +146,13 @@ function setQty(value: number): void {
 .qty-presets { display: flex; align-items: end; gap: 2px; padding-bottom: 1px; }
 .qty-presets button { min-width: 33px; height: 28px; padding: 0 5px; font-size: 11px; }
 .check { display: flex; align-items: center; gap: 6px; padding-bottom: 6px; }
+.sound-control { display: grid; grid-template-columns: auto 27px 58px auto; gap: 4px; align-items: center; padding-bottom: 1px; color: var(--muted); font-size: 10px; letter-spacing: 0.04em; }
+.sound-control.muted { color: #687789; }
+.sound-toggle { width: 27px; height: 27px; display: grid; place-items: center; padding: 0; color: var(--brand); }
+.sound-control.muted .sound-toggle { color: var(--muted); }
+.sound-control input[type="range"] { width: 58px; padding: 0; accent-color: var(--brand); }
+.sound-control small { min-width: 32px; color: var(--brand); font-size: 9px; letter-spacing: 0.04em; }
+.sound-control.muted small { color: var(--muted); }
 .submission-status { flex: 1 1 220px; min-width: 0; display: grid; gap: 2px; align-self: stretch; align-content: center; padding-left: 3px; color: var(--muted); font-size: 11px; }
 .submission-status > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .submission-status small { color: #758397; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

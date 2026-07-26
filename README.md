@@ -37,6 +37,7 @@ python -m venv .venv
 pip install -r requirements.txt
 $env:OF_MD_MODE = "mock"
 $env:OF_TRADE_MODE = "mock"
+$env:OF_TRADING = "true"  # 仅显式解锁本地 Mock 下单
 python -m uvicorn app.main:app --host 127.0.0.1 --port 3811
 ```
 
@@ -48,7 +49,8 @@ npm ci
 npm run dev
 ```
 
-访问 `http://127.0.0.1:3810`。Mock 模式不会连接真实账户或发送真实订单。
+访问 `http://127.0.0.1:3810`。交易开关默认关闭；上面的显式开关只解锁
+内存 Mock 流程，不会连接真实账户或发送真实订单。
 
 使用 Lighter 公共行情：
 
