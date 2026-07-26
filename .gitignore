@@ -17,6 +17,8 @@ dist/
 .vscode/
 .runtime_token
 logs/
+*chrome*profile*/
+**/*chrome*profile*/
 data/
 secrets/
 *.db
