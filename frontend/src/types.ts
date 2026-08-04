@@ -44,6 +44,7 @@ export interface FootprintBin {
   price: number;
   buyVol: number;
   sellVol: number;
+  unknownVol?: number;
   tradeCount: number;
   delta: number;
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { BarChart3 } from "@lucide/vue";
 import {
   CandlestickSeries,
   ColorType,
@@ -13,6 +14,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { buildChipProfile, type ChipProfileLevel } from "../chipProfile";
 import type { ChartBar, ChartPayload, FootprintBin } from "../types";
 
 const props = defineProps<{ chart: ChartPayload | null }>();
@@ -37,13 +39,18 @@ interface HoverState {
 
 const chartHost = ref<HTMLDivElement | null>(null);
 const overlay = ref<HTMLCanvasElement | null>(null);
+const chipPanel = ref<HTMLDivElement | null>(null);
+const chipCanvas = ref<HTMLCanvasElement | null>(null);
 const hover = ref<HoverState | null>(null);
 const visibleBars = ref(12);
+const chipVisible = ref(true);
+const CHIP_VISIBILITY_STORAGE_KEY = "pxy-orderflow-chip-profile-visible";
 let chartApi: IChartApi | null = null;
 let candles: ISeriesApi<"Candlestick"> | null = null;
 let cvdSeries: ISeriesApi<"Line"> | null = null;
 let deltaSeries: ISeriesApi<"Histogram"> | null = null;
 let observer: ResizeObserver | null = null;
+let chipDrawFrame: number | null = null;
 let enforcingRange = false;
 let drawFrame = 0;
 let loadedBarCount = 0;
@@ -55,6 +62,20 @@ const intervalLabel = computed(() => {
   if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`;
   if (ms >= 1_000) return `${ms / 1_000}s`;
   return `${ms}ms`;
+});
+const hoveredBarIndex = ref<number | null>(null);
+const chipEndIndex = computed(() => {
+  const bars = props.chart?.bars || [];
+  if (!bars.length) return -1;
+  const hovered = hoveredBarIndex.value;
+  if (hovered !== null && hovered >= 0 && hovered < bars.length) return hovered;
+  return bars.length - 1;
+});
+const chipProfile = computed(() => buildChipProfile(props.chart?.bars || [], chipEndIndex.value));
+const chipReferenceBar = computed(() => {
+  const bars = props.chart?.bars || [];
+  const index = chipEndIndex.value;
+  return index >= 0 && index < bars.length ? bars[index] : null;
 });
 const latestStats = computed(() => {
   const bar = latest.value;
@@ -94,6 +115,101 @@ function formatSigned(value: number): string {
 
 function formatPercent(value: number): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
+function toggleChipProfile(): void {
+  chipVisible.value = !chipVisible.value;
+  window.localStorage.setItem(CHIP_VISIBILITY_STORAGE_KEY, chipVisible.value ? "1" : "0");
+  if (chipVisible.value) scheduleChipDraw();
+}
+
+function scheduleChipDraw(): void {
+  if (chipDrawFrame !== null) return;
+  void nextTick(() => {
+    if (chipDrawFrame !== null) return;
+    chipDrawFrame = window.requestAnimationFrame(() => {
+      chipDrawFrame = null;
+      drawChipPanel();
+    });
+  });
+}
+
+// 筹码分布（K 线图右侧，参考同花顺）：按「截至参考 K 线」的窗口累计各档成交量，
+// 悬停哪根 K 线就重算到哪根（未悬停取最新一根）。低于参考 close = 获利盘(红)，
+// 高于参考 close = 套牢盘(蓝)；条宽 = 该档相对最大档占比；POC 黄色描边。
+function drawChipPanel(): void {
+  if (!chipVisible.value) return;
+  const panel = chipPanel.value;
+  const canvas = chipCanvas.value;
+  const api = chartApi;
+  if (!panel || !canvas || !api || !candles) return;
+  panel.style.right = `${api.priceScale("right").width()}px`;
+  const levels = chipProfile.value.levels;
+  if (!levels.length) {
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const pane = api.paneSize(0);
+  const cssWidth = Math.max(1, Math.floor(rect.width));
+  const cssHeight = Math.max(1, Math.floor(pane.height));
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const width = cssWidth * dpr;
+  const height = cssHeight * dpr;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = Math.round(width);
+    canvas.height = Math.round(height);
+  }
+  canvas.style.height = `${cssHeight}px`;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+  const visibleLevels = levels
+    .map((level) => {
+      const coordinate = candles!.priceToCoordinate(level.price);
+      return { level, y: coordinate === null ? null : Number(coordinate) };
+    })
+    .filter((item): item is { level: ChipProfileLevel; y: number } => (
+      item.y !== null && Number.isFinite(item.y) && item.y >= -4 && item.y <= cssHeight + 4
+    ));
+  const sortedY = visibleLevels
+    .map((item) => Number(item.y))
+    .sort((left, right) => left - right);
+  const yGaps = sortedY
+    .slice(1)
+    .map((value, index) => Math.abs(value - sortedY[index]))
+    .filter((gap) => gap > 0);
+  const rowHeight = Math.max(1, Math.min(5, yGaps.length ? Math.min(...yGaps) : 3));
+
+  for (const { level, y } of visibleLevels) {
+    const barWidth = Math.max(1, (level.widthPct / 100) * (cssWidth - 2));
+    ctx.fillStyle = level.isBelowReference
+      ? "rgba(232, 73, 83, 0.7)"
+      : "rgba(72, 137, 226, 0.7)";
+    const barX = cssWidth - barWidth;
+    ctx.fillRect(barX, Number(y) - rowHeight / 2, barWidth, rowHeight);
+    if (level.isPoc) {
+      ctx.strokeStyle = "rgba(255, 209, 102, 0.95)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(barX + 0.5, Number(y) - rowHeight / 2 - 0.5, Math.max(1, barWidth - 1), rowHeight + 1);
+    }
+  }
+
+  const refY = candles.priceToCoordinate(chipProfile.value.referencePrice);
+  if (refY !== null && Number.isFinite(refY)) {
+    ctx.strokeStyle = "rgba(255, 209, 102, 0.8)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(0, Number(refY));
+    ctx.lineTo(cssWidth, Number(refY));
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
 }
 
 function analyzeBins(source: FootprintBin[]): AnalyzedBin[] {
@@ -300,13 +416,24 @@ function enforceVisibleRange(): void {
     visibleBars.value = target;
   }
   scheduleDraw();
+  scheduleChipDraw();
 }
 
 function onCrosshair(param: MouseEventParams<Time>): void {
   const bar = barForTime(param.time);
   if (!bar || !param.point) {
     hover.value = null;
+    if (hoveredBarIndex.value !== null) {
+      hoveredBarIndex.value = null;
+      scheduleChipDraw();
+    }
     return;
+  }
+  const bars = props.chart?.bars || [];
+  const barIndex = bars.findIndex((item) => item.startTs === bar.startTs);
+  if (hoveredBarIndex.value !== barIndex) {
+    hoveredBarIndex.value = barIndex >= 0 ? barIndex : null;
+    scheduleChipDraw();
   }
   const priceValue = candles?.coordinateToPrice(param.point.y);
   const price = priceValue === null || priceValue === undefined ? undefined : Number(priceValue);
@@ -374,7 +501,10 @@ function initialize(): void {
   panes[1]?.setStretchFactor(1.35);
   chartApi.timeScale().subscribeVisibleLogicalRangeChange(enforceVisibleRange);
   chartApi.subscribeCrosshairMove(onCrosshair);
-  observer = new ResizeObserver(scheduleDraw);
+  observer = new ResizeObserver(() => {
+    scheduleDraw();
+    scheduleChipDraw();
+  });
   observer.observe(chartHost.value);
 }
 
@@ -388,7 +518,9 @@ function setData(): void {
     loadedBarCount = 0;
     loadedLastTime = null;
     hover.value = null;
+    hoveredBarIndex.value = null;
     scheduleDraw();
+    scheduleChipDraw();
     return;
   }
 
@@ -433,9 +565,11 @@ function setData(): void {
   loadedBarCount = bars.length;
   loadedLastTime = nextLastTime;
   scheduleDraw();
+  scheduleChipDraw();
 }
 
 onMounted(async () => {
+  chipVisible.value = window.localStorage.getItem(CHIP_VISIBILITY_STORAGE_KEY) !== "0";
   await nextTick();
   initialize();
   setData();
@@ -443,6 +577,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (drawFrame) cancelAnimationFrame(drawFrame);
+  if (chipDrawFrame !== null) {
+    window.cancelAnimationFrame(chipDrawFrame);
+    chipDrawFrame = null;
+  }
   observer?.disconnect();
   chartApi?.remove();
   chartApi = null;
@@ -458,6 +596,17 @@ watch(() => props.chart, setData, { deep: true });
         <strong>ORDER FLOW</strong>
         <span>{{ chart?.symbol || "MARKET" }}</span>
         <span>{{ intervalLabel }}</span>
+        <button
+          type="button"
+          class="chip-toggle"
+          :class="{ active: chipVisible }"
+          :aria-pressed="chipVisible"
+          :title="chipVisible ? 'Hide chip profile' : 'Show chip profile'"
+          @click="toggleChipProfile"
+        >
+          <BarChart3 :size="12" aria-hidden="true" />
+          <span>CHIP</span>
+        </button>
         <i class="live-dot" :class="{ active: Boolean(latest) }" aria-hidden="true" />
         <span class="live-label">LIVE</span>
       </div>
@@ -468,9 +617,12 @@ watch(() => props.chart, setData, { deep: true });
         <span>CVD <b :class="(latest?.cvd || 0) >= 0 ? 'buy' : 'sell'">{{ latest ? formatSigned(latest.cvd) : "-" }}</b></span>
       </div>
     </header>
-    <div class="chart-shell">
+    <div class="chart-shell" :class="{ 'chip-visible': chipVisible && chipProfile.levels.length }">
       <div ref="chartHost" class="chart-host" />
       <canvas ref="overlay" class="footprint-overlay" />
+      <div v-if="chipVisible && chipProfile.levels.length" ref="chipPanel" class="chip-panel" aria-label="Chip profile of traded volume up to the reference bar">
+        <canvas ref="chipCanvas" class="chip-canvas" />
+      </div>
       <div class="pane-label footprint-label"><span>BID</span><b>×</b><span>ASK</span></div>
       <div class="pane-label cvd-label">
         <strong>CVD</strong>
@@ -513,6 +665,12 @@ watch(() => props.chart, setData, { deep: true });
       <span><i class="legend sell" /> BID IMBALANCE</span>
       <span v-if="latestStats">BUY {{ latestStats.buyRatio.toFixed(1) }}%</span>
       <span v-if="latestStats">Δ% <b :class="latestStats.deltaRatio >= 0 ? 'buy' : 'sell'">{{ formatPercent(latestStats.deltaRatio) }}</b></span>
+      <span v-if="chipVisible && chipProfile.levels.length" class="chip-footer">
+        CHIP <b>{{ chipReferenceBar ? formatPrice(chipProfile.referencePrice) : "-" }}</b>
+        · BELOW {{ chipProfile.belowReferencePct !== null ? chipProfile.belowReferencePct.toFixed(1) + "%" : "-" }}
+        · AVG {{ chipProfile.averagePrice !== null ? formatPrice(chipProfile.averagePrice) : "-" }}
+        · POC {{ chipProfile.pocPrice !== null ? formatPrice(chipProfile.pocPrice) : "-" }}
+      </span>
       <span class="visible-count">{{ Math.min(40, Math.max(0, visibleBars)) }} BARS</span>
     </footer>
   </section>
@@ -527,6 +685,8 @@ watch(() => props.chart, setData, { deep: true });
 .identity, .readout { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
 .identity strong { color: var(--text); font-size: 11px; }
 .identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-toggle { height: 22px; padding: 0 6px; display: inline-flex; align-items: center; gap: 4px; border-radius: 0; border-color: #2d3946; color: #8291a2; background: #111922; font-size: 9px; white-space: nowrap; }
+.chip-toggle.active { color: #8fc3ff; border-color: #3974a3; background: #142a3b; }
 .live-dot { width: 5px; height: 5px; border-radius: 50%; background: #4a5663; }
 .live-dot.active { background: #39d99a; box-shadow: 0 0 0 3px rgba(57, 217, 154, 0.12); }
 .live-label { color: #39d99a; font-size: 8px; }
@@ -536,8 +696,12 @@ watch(() => props.chart, setData, { deep: true });
 .chart-shell { position: relative; min-height: 0; overflow: hidden; }
 .chart-host { position: absolute; inset: 0; }
 .footprint-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+/* 筹码分布面板：K 线图右侧，与价格轴对齐（同花顺样式） */
+.chip-panel { position: absolute; top: 0; right: 68px; bottom: 0; width: 92px; z-index: 3; pointer-events: none; overflow: hidden; }
+.chip-canvas { position: absolute; top: 0; left: 0; width: 100%; display: block; }
 .pane-label { position: absolute; z-index: 4; display: flex; align-items: center; gap: 5px; color: #728093; font-size: 8px; font-variant-numeric: tabular-nums; pointer-events: none; }
-.footprint-label { top: 6px; right: 77px; }
+.footprint-label { top: 6px; right: 76px; }
+.chip-visible .footprint-label { right: 168px; }
 .footprint-label span:first-child { color: #ff7180; }
 .footprint-label span:last-child { color: #39d99a; }
 .cvd-label { bottom: 28px; left: 8px; padding: 2px 5px; background: rgba(10, 15, 21, 0.78); }
@@ -545,6 +709,7 @@ watch(() => props.chart, setData, { deep: true });
 .cvd-label i { color: #7e8b9b; font-style: normal; }
 .hover-readout { position: absolute; top: 9px; left: 8px; z-index: 5; width: 218px; padding: 7px; border: 1px solid #3a4b5e; background: rgba(8, 13, 19, 0.96); box-shadow: 0 5px 16px rgba(0, 0, 0, 0.28); color: #9daab9; font-size: 9px; font-variant-numeric: tabular-nums; pointer-events: none; }
 .hover-readout.right { left: auto; right: 76px; }
+.chip-visible .hover-readout.right { right: 168px; }
 .hover-title { display: flex; justify-content: space-between; align-items: center; padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid #263240; }
 .hover-title b { color: #dce5ee; }
 .hover-title span { color: #f2c94c; font-weight: 700; }
@@ -572,6 +737,8 @@ watch(() => props.chart, setData, { deep: true });
   .chart-footer span:nth-child(2), .chart-footer span:nth-child(3), .chart-footer span:nth-child(4) { display: none; }
   .hover-readout, .hover-readout.right { top: 7px; left: 7px; right: auto; width: min(218px, calc(100% - 86px)); }
   .footprint-label { right: 72px; }
+  .chip-visible .footprint-label { right: 164px; }
+  .chip-visible .hover-readout, .chip-visible .hover-readout.right { right: auto; }
 }
 @media (max-width: 420px) {
   .identity { gap: 5px; }
